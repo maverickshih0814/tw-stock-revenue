@@ -174,6 +174,10 @@ c2.metric("MA3（億元）", f"{latest['MA3']:,.2f}" if pd.notna(latest["MA3"]) 
 c3.metric("MA12（億元）", f"{latest['MA12']:,.2f}" if pd.notna(latest["MA12"]) else "—")
 c4.metric("月營收 YoY", f"{latest['月營收YoY']:+.2f}%" if pd.notna(latest["月營收YoY"]) else "—")
 
+st.markdown(
+    f"### {stock_id} {stock_name}｜月營收與移動平均"
+)
+
 fig = go.Figure()
 for enabled, column, color, width in [
     (show_revenue, "月營收", "#9ca3af", 1.8),
@@ -188,12 +192,19 @@ for enabled, column, color, width in [
             connectgaps=False,
         ))
 fig.update_layout(
-    title=f"{stock_id} {stock_name}｜月營收與移動平均", xaxis_title="營收月份",
+    title=None, xaxis_title="營收月份",
     yaxis_title="新台幣億元", hovermode="x unified", height=550,
-    legend=dict(orientation="h", y=1.08), margin=dict(l=25, r=20, t=75, b=25),
+    legend=dict(orientation="h", y=1.08), margin=dict(l=40, r=30, t=35, b=50),
 )
 fig.update_xaxes(tickformat="%Y-%m", rangeslider_visible=True)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={
+        "displayModeBar": "hover",
+        "displaylogo": False
+    }
+)
 st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
 
 if show_yoy:
