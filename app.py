@@ -95,6 +95,58 @@ def fetch_revenue(stock_id: str, start_date: str, end_date: str, token: str) -> 
     return raw
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def fetch_monthly_price(
+    stock_id, start_date, end_date, token
+):
+    api = DataLoader()
+
+    if token:
+        api.login_by_token(api_token=token)
+
+    # 取得每日股價
+    daily = api.taiwan_stock_daily(
+        stock_id=stock_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    if daily is None or daily.empty:
+        return pd.DataFrame()
+
+    daily = daily.copy()
+
+    daily["date"] = pd.to_datetime(daily["date"])
+
+    for col in ["max", "min", "close"]:
+        daily[col] = pd.to_numeric(
+            daily[col], errors="coerce"
+        )
+
+    daily = daily.dropna(
+        subset=["max", "min", "close"]
+    )
+
+    # 排除無效報價
+    daily = daily[
+        (daily["max"] > 0) &
+        (daily["min"] > 0) &
+        (daily["close"] > 0)
+    ]
+
+    # 將每日股價彙整為每月股價
+    daily["month"] = (
+        daily["date"].dt.to_period("M").dt.to_timestamp()
+    )
+
+    monthly = daily.groupby("month").agg(
+        月最高價=("max", "max"),
+        月最低價=("min", "min"),
+        月平均股價=("close", "mean")
+    )
+
+    return monthly.sort_index()
+
 with st.sidebar:
     st.header("查詢設定")
     stock_query = st.text_input("股票代號或公司名稱", value="2330", placeholder="例如：2330、台積電、聯發科").strip()
@@ -108,6 +160,7 @@ with st.sidebar:
 
 if refresh:
     fetch_revenue.clear()
+    fetch_monthly_price.clear()
 
 
 if not stock_query:
@@ -206,6 +259,112 @@ st.plotly_chart(
     }
 )
 st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
+
+
+# ===== 月股價趨勢圖 =====
+
+st.markdown(
+    f"### {stock_id} {stock_name}｜月股價趨勢"
+)
+
+try:
+    with st.spinner("正在取得每日股價資料..."):
+        price_df = fetch_monthly_price(
+            stock_id,
+            first_month.isoformat(),
+            now.isoformat(),
+            get_token()
+        )
+
+except Exception as exc:
+    st.warning(f"股價資料取得失敗：{exc}")
+    price_df = pd.DataFrame()
+
+if not price_df.empty:
+
+    price_view = price_df.loc[
+        (price_df.index >= pd.Timestamp(first_month)) &
+        (price_df.index <= pd.Timestamp(now))
+    ].copy()
+
+    price_fig = go.Figure()
+
+    price_lines = [
+        ("月最高價", "#dc2626"),
+        ("月平均股價", "#2563eb"),
+        ("月最低價", "#16a34a")
+    ]
+
+    for column, color in price_lines:
+        price_fig.add_trace(
+            go.Scatter(
+                x=price_view.index,
+                y=price_view[column],
+                mode="lines+markers",
+                name=column,
+                line=dict(color=color, width=2.5),
+                marker=dict(size=4),
+                hovertemplate=(
+                    "%{x|%Y-%m}<br>"
+                    "%{y:,.2f} 元"
+                    "<extra>" + column + "</extra>"
+                ),
+                connectgaps=False
+            )
+        )
+
+    price_fig.update_layout(
+        title=None,
+        xaxis_title="交易月份",
+        yaxis_title="股價（新台幣元）",
+        hovermode="x unified",
+        height=500,
+        legend=dict(
+            orientation="h",
+            y=1.08
+        ),
+        margin=dict(
+            l=40, r=30, t=35, b=50
+        )
+    )
+
+    price_fig.update_xaxes(
+        tickformat="%Y-%m",
+        rangeslider_visible=True,
+        range=[
+            pd.Timestamp(first_month),
+            pd.Timestamp(now)
+        ]
+    )
+
+    st.plotly_chart(
+        price_fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": "hover",
+            "displaylogo": False
+        }
+    )
+
+    st.caption(
+        "月最高價＝當月最高成交價；"
+        "月最低價＝當月最低成交價；"
+        "月平均股價＝當月每日收盤價算術平均。"
+        "採未還原股價，除權息、股票分割等"
+        "可能影響跨期比較。"
+    )
+
+    # 顯示最近 12 個月股價統計
+    with st.expander("查看最近 12 個月股價明細"):
+        st.dataframe(
+            price_view.tail(12)
+            .sort_index(ascending=False)
+            .style.format("{:,.2f}"),
+            use_container_width=True
+        )
+
+else:
+    st.info("目前沒有取得可用的股價資料。")
 
 if show_yoy:
     yoy_fig = go.Figure(go.Scatter(
