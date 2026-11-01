@@ -20,6 +20,46 @@ def get_token():
     except (FileNotFoundError, KeyError):
         return os.getenv("FINMIND_TOKEN", "")
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_stock_info(token):
+    api = DataLoader()
+
+    if token:
+        api.login_by_token(api_token=token)
+
+    df = api.taiwan_stock_info()
+
+    if df is None or df.empty:
+        raise ValueError("無法取得股票名稱清單")
+
+    df = df[["stock_id", "stock_name"]].copy()
+    df = df.dropna().drop_duplicates()
+    df["stock_id"] = df["stock_id"].astype(str).str.strip()
+    df["stock_name"] = df["stock_name"].astype(str).str.strip()
+
+    return df
+
+
+def resolve_stock(query, stock_info):
+    query = query.strip()
+
+    # 先尋找完全相同的股票代號
+    matches = stock_info[
+        stock_info["stock_id"] == query
+    ]
+
+    # 找不到代號，再以公司名稱搜尋
+    if matches.empty:
+        matches = stock_info[
+            stock_info["stock_name"] == query
+        ]
+
+    if matches.empty:
+        return None, None
+
+    stock = matches.iloc[0]
+
+    return stock["stock_id"], stock["stock_name"]
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def fetch_revenue(stock_id: str, start_date: str, end_date: str, token: str) -> pd.DataFrame:
@@ -57,7 +97,7 @@ def fetch_revenue(stock_id: str, start_date: str, end_date: str, token: str) -> 
 
 with st.sidebar:
     st.header("查詢設定")
-    stock_id = st.text_input("股票代號", value="2330", max_chars=10).strip()
+    stock_query = st.text_input("股票代號或公司名稱", value="2330", placeholder="例如：2330、台積電、聯發科").strip()
     years = st.selectbox("顯示期間", [2, 3, 4, 5, 10], index=2, format_func=lambda x: f"最近 {x} 年")
     show_revenue = st.checkbox("月營收", value=True)
     show_ma3 = st.checkbox("MA3", value=True)
@@ -69,9 +109,33 @@ with st.sidebar:
 if refresh:
     fetch_revenue.clear()
 
-if not stock_id or not stock_id.isalnum():
-    st.warning("請輸入有效的上市櫃股票代號。")
+
+if not stock_query:
+    st.warning("請輸入股票代號或公司名稱")
     st.stop()
+
+try:
+    stock_info = fetch_stock_info(get_token())
+
+    stock_id, stock_name = resolve_stock(
+        stock_query, stock_info
+    )
+
+except Exception as exc:
+    st.error(f"取得股票名稱清單失敗：{exc}")
+    st.stop()
+
+if stock_id is None:
+    st.warning(
+        f"找不到「{stock_query}」，"
+        "請確認股票代號或公司名稱。"
+    )
+    st.stop()
+
+st.sidebar.success(
+    f"已辨識：{stock_id} {stock_name}"
+)
+
 
 now = date.today()
 first_month = now.replace(day=1) - relativedelta(months=years * 12 - 1)
@@ -100,7 +164,10 @@ if valid.empty:
 latest_month = valid.index[-1]
 latest = valid.iloc[-1]
 
-st.subheader(f"{stock_id}｜截至 {latest_month:%Y-%m} 的已取得營收")
+st.subheader(
+    f"{stock_id} {stock_name}｜"
+    f"截至 {latest_month:%Y-%m} 的已取得營收"
+)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("最新月營收（億元）", f"{latest['月營收']:,.2f}")
 c2.metric("MA3（億元）", f"{latest['MA3']:,.2f}" if pd.notna(latest["MA3"]) else "—")
@@ -121,7 +188,7 @@ for enabled, column, color, width in [
             connectgaps=False,
         ))
 fig.update_layout(
-    title=f"{stock_id} 月營收與移動平均", xaxis_title="營收月份",
+    title=f"{stock_id} {stock_name}｜月營收與移動平均", xaxis_title="營收月份",
     yaxis_title="新台幣億元", hovermode="x unified", height=550,
     legend=dict(orientation="h", y=1.08), margin=dict(l=25, r=20, t=75, b=25),
 )
