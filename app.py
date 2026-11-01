@@ -1,0 +1,156 @@
+"""台股月營收分析：FinMind + Streamlit + Plotly。"""
+import os
+from datetime import date
+from io import StringIO
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from dateutil.relativedelta import relativedelta
+from FinMind.data import DataLoader
+
+st.set_page_config(page_title="台股月營收趨勢分析", page_icon="📈", layout="wide")
+st.title("📈 台股月營收趨勢分析")
+st.caption("FinMind 資料｜月營收、3 個月移動平均（MA3）、12 個月移動平均（MA12）")
+
+
+def get_token():
+    try:
+        return st.secrets.get("FINMIND_TOKEN", os.getenv("FINMIND_TOKEN", ""))
+    except (FileNotFoundError, KeyError):
+        return os.getenv("FINMIND_TOKEN", "")
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def fetch_revenue(stock_id: str, start_date: str, end_date: str, token: str) -> pd.DataFrame:
+    api = DataLoader()
+    if token:
+        api.login_by_token(api_token=token)
+    raw = api.taiwan_stock_month_revenue(
+        stock_id=stock_id, start_date=start_date, end_date=end_date
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    required = {"revenue_year", "revenue_month", "revenue"}
+    if not required.issubset(raw.columns):
+        raise ValueError(f"FinMind 回傳資料缺少欄位：{required - set(raw.columns)}")
+    raw = raw.copy()
+    raw["month"] = pd.to_datetime(
+        dict(year=raw["revenue_year"].astype(int),
+             month=raw["revenue_month"].astype(int), day=1)
+    )
+    raw["revenue"] = pd.to_numeric(raw["revenue"], errors="coerce")
+    # 同一營收月份若有多筆，以較晚公布的一筆為準。
+    if "date" in raw.columns:
+        raw = raw.sort_values(["month", "date"])
+    else:
+        raw = raw.sort_values("month")
+    raw = raw.drop_duplicates("month", keep="last").set_index("month")
+    raw = raw[["revenue"]].sort_index().asfreq("MS")
+    raw["月營收"] = raw["revenue"] / 100_000_000  # 新台幣億元
+    raw["MA3"] = raw["月營收"].rolling(3, min_periods=3).mean()
+    raw["MA12"] = raw["月營收"].rolling(12, min_periods=12).mean()
+    raw["月營收YoY"] = raw["月營收"].pct_change(12, fill_method=None) * 100
+    raw["MA3 YoY"] = raw["MA3"].pct_change(12, fill_method=None) * 100
+    return raw
+
+
+with st.sidebar:
+    st.header("查詢設定")
+    stock_id = st.text_input("股票代號", value="2330", max_chars=10).strip()
+    years = st.selectbox("顯示期間", [2, 3, 4, 5, 10], index=2, format_func=lambda x: f"最近 {x} 年")
+    show_revenue = st.checkbox("月營收", value=True)
+    show_ma3 = st.checkbox("MA3", value=True)
+    show_ma12 = st.checkbox("MA12", value=True)
+    show_yoy = st.checkbox("另顯示月營收 YoY 圖", value=False)
+    refresh = st.button("重新取得資料", use_container_width=True)
+    st.caption("如有 FinMind Token，可設定環境變數 FINMIND_TOKEN 或 Streamlit secrets。")
+
+if refresh:
+    fetch_revenue.clear()
+
+if not stock_id or not stock_id.isalnum():
+    st.warning("請輸入有效的上市櫃股票代號。")
+    st.stop()
+
+now = date.today()
+first_month = now.replace(day=1) - relativedelta(months=years * 12 - 1)
+# 為了在顯示區間第一個月有完整 MA12，並計算 MA3 YoY，往前抓 23 個月。
+fetch_start = first_month - relativedelta(months=23)
+
+try:
+    with st.spinner("正在從 FinMind 取得月營收資料..."):
+        df = fetch_revenue(stock_id, fetch_start.isoformat(), now.isoformat(), get_token())
+except Exception as exc:
+    st.error(f"資料取得失敗：{exc}")
+    st.info("請確認網路、FinMind API 額度、股票代號及 Token 設定。")
+    st.stop()
+
+if df.empty or df["月營收"].dropna().empty:
+    st.warning("沒有取得月營收資料。請檢查股票代號或 FinMind 資料可用性。")
+    st.stop()
+
+# 排除未來營收月份；未公布月份不補零。
+df = df.loc[df.index <= pd.Timestamp(now.replace(day=1))]
+view = df.loc[df.index >= pd.Timestamp(first_month)].copy()
+valid = view.dropna(subset=["月營收"])
+if valid.empty:
+    st.warning("選定期間內沒有可用營收資料。")
+    st.stop()
+latest_month = valid.index[-1]
+latest = valid.iloc[-1]
+
+st.subheader(f"{stock_id}｜截至 {latest_month:%Y-%m} 的已取得營收")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("最新月營收（億元）", f"{latest['月營收']:,.2f}")
+c2.metric("MA3（億元）", f"{latest['MA3']:,.2f}" if pd.notna(latest["MA3"]) else "—")
+c3.metric("MA12（億元）", f"{latest['MA12']:,.2f}" if pd.notna(latest["MA12"]) else "—")
+c4.metric("月營收 YoY", f"{latest['月營收YoY']:+.2f}%" if pd.notna(latest["月營收YoY"]) else "—")
+
+fig = go.Figure()
+for enabled, column, color, width in [
+    (show_revenue, "月營收", "#9ca3af", 1.8),
+    (show_ma3, "MA3", "#2563eb", 2.6),
+    (show_ma12, "MA12", "#dc2626", 3.0),
+]:
+    if enabled:
+        fig.add_trace(go.Scatter(
+            x=view.index, y=view[column], mode="lines+markers", name=column,
+            line=dict(color=color, width=width), marker=dict(size=3),
+            hovertemplate="%{x|%Y-%m}<br>%{y:,.2f} 億元<extra>" + column + "</extra>",
+            connectgaps=False,
+        ))
+fig.update_layout(
+    title=f"{stock_id} 月營收與移動平均", xaxis_title="營收月份",
+    yaxis_title="新台幣億元", hovermode="x unified", height=550,
+    legend=dict(orientation="h", y=1.08), margin=dict(l=25, r=20, t=75, b=25),
+)
+fig.update_xaxes(tickformat="%Y-%m", rangeslider_visible=True)
+st.plotly_chart(fig, use_container_width=True)
+st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
+
+if show_yoy:
+    yoy_fig = go.Figure(go.Scatter(
+        x=view.index, y=view["月營收YoY"], mode="lines+markers", name="月營收 YoY",
+        line=dict(color="#16a34a", width=2), connectgaps=False,
+        hovertemplate="%{x|%Y-%m}<br>%{y:+.2f}%<extra></extra>",
+    ))
+    yoy_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    yoy_fig.update_layout(title="月營收年增率", yaxis_title="%", height=350)
+    st.plotly_chart(yoy_fig, use_container_width=True)
+
+st.subheader("月營收明細")
+output = view[["月營收", "MA3", "MA12", "月營收YoY", "MA3 YoY"]].copy()
+output.index.name = "營收月份"
+st.dataframe(output.sort_index(ascending=False).style.format("{:,.2f}", na_rep="—"), use_container_width=True)
+
+csv = output.to_csv(encoding="utf-8-sig", float_format="%.4f")
+a, b = st.columns(2)
+with a:
+    st.download_button("下載 CSV", csv.encode("utf-8-sig"),
+                       file_name=f"{stock_id}_monthly_revenue.csv", mime="text/csv", use_container_width=True)
+with b:
+    st.download_button("下載互動式 HTML 圖表", fig.to_html(include_plotlyjs=True).encode("utf-8"),
+                       file_name=f"{stock_id}_revenue_chart.html", mime="text/html", use_container_width=True)
+
+st.info("說明：MA3/MA12 為含當月的移動平均；資料以實際營收所屬月份排列。當月份資料尚未公布時，不會用 0 補值。若 FinMind 缺少月份，對應移動平均可能顯示空值。")

@@ -1,0 +1,5 @@
+streamlit>=1.35
+FinMind>=1.6
+pandas>=2.0
+plotly>=5.20
+python-dateutil>=2.8
