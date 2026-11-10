@@ -278,15 +278,7 @@ st.plotly_chart(
 st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
 
 
-st.subheader("所選月份的股價走勢")
-price_months = pd.date_range(first_month, now.replace(day=1), freq="MS")[::-1]
-selected_month = st.selectbox(
-    "交易月份",
-    price_months,
-    index=price_months.get_loc(latest_month),
-    format_func=lambda month: f"{month:%Y-%m}",
-    key=f"price-month-{stock_id}-{years}",
-)
+st.subheader("多月股價趨勢")
 
 # 單月走勢與跨月統計共用同一次 FinMind 日股價查詢。
 try:
@@ -304,13 +296,6 @@ except Exception as exc:
 
 if not daily_prices.empty:
     trading_months = daily_prices["date"].dt.to_period("M")
-    month_prices = daily_prices.loc[trading_months == selected_month.to_period("M")]
-    if month_prices.empty:
-        st.info("所選月份沒有可用的成交資料。")
-    else:
-        render_daily_prices(month_prices)
-
-    st.subheader("多月股價趨勢")
     price_view = daily_prices.groupby(trading_months.dt.to_timestamp()).agg(
         月最高價=("max", "max"),
         月最低價=("min", "min"),
@@ -391,6 +376,23 @@ if not daily_prices.empty:
 
 else:
     st.info("目前沒有取得可用的股價資料。")
+
+st.subheader("所選月份的股價走勢")
+price_months = pd.date_range(first_month, now.replace(day=1), freq="MS")[::-1]
+selected_month = st.selectbox(
+    "交易月份",
+    price_months,
+    index=price_months.get_loc(latest_month),
+    format_func=lambda month: f"{month:%Y-%m}",
+    key=f"price-month-{stock_id}-{years}",
+)
+
+if not daily_prices.empty:
+    month_prices = daily_prices.loc[trading_months == selected_month.to_period("M")]
+    if month_prices.empty:
+        st.info("所選月份沒有可用的成交資料。")
+    else:
+        render_daily_prices(month_prices)
 
 if show_yoy:
     yoy_fig = go.Figure(go.Scatter(
