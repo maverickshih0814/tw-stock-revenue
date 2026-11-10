@@ -1,7 +1,7 @@
 """台股月營收分析：FinMind + Streamlit + Plotly。"""
 import os
-from datetime import date
-from io import StringIO
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,7 +11,9 @@ from FinMind.data import DataLoader
 
 st.set_page_config(page_title="台股月營收趨勢分析", page_icon="📈", layout="wide")
 st.title("📈 台股月營收趨勢分析")
-st.caption("FinMind 資料｜月營收、3 個月移動平均（MA3）、12 個月移動平均（MA12）")
+st.caption("FinMind 資料｜月營收、移動平均與股價走勢")
+
+CHART_CONFIG = {"displayModeBar": False, "displaylogo": False}
 
 
 def get_token():
@@ -96,56 +98,77 @@ def fetch_revenue(stock_id: str, start_date: str, end_date: str, token: str) -> 
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def fetch_monthly_price(
-    stock_id, start_date, end_date, token
-):
+def fetch_daily_prices(stock_id, start_date, end_date, token):
     api = DataLoader()
-
     if token:
         api.login_by_token(api_token=token)
-
-    # 取得每日股價
     daily = api.taiwan_stock_daily(
-        stock_id=stock_id,
-        start_date=start_date,
-        end_date=end_date
+        stock_id=stock_id, start_date=start_date, end_date=end_date
     )
-
     if daily is None or daily.empty:
         return pd.DataFrame()
 
-    daily = daily.copy()
+    price_columns = ["max", "min", "close"]
+    required = {"date", *price_columns}
+    missing = required - set(daily.columns)
+    if missing:
+        raise ValueError(f"FinMind 股價資料缺少欄位：{', '.join(sorted(missing))}")
 
-    daily["date"] = pd.to_datetime(daily["date"])
+    daily = daily[["date", *price_columns]].copy()
+    daily["date"] = pd.to_datetime(daily["date"], errors="coerce").dt.normalize()
+    for column in price_columns:
+        daily[column] = pd.to_numeric(daily[column], errors="coerce")
 
-    for col in ["max", "min", "close"]:
-        daily[col] = pd.to_numeric(
-            daily[col], errors="coerce"
-        )
-
-    daily = daily.dropna(
-        subset=["max", "min", "close"]
+    in_range = daily["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))
+    valid_prices = daily[price_columns].gt(0).all(axis=1)
+    return (
+        daily.loc[in_range & valid_prices]
+        .sort_values("date", kind="stable")
+        .drop_duplicates("date", keep="last")
     )
 
-    # 排除無效報價
-    daily = daily[
-        (daily["max"] > 0) &
-        (daily["min"] > 0) &
-        (daily["close"] > 0)
-    ]
 
-    # 將每日股價彙整為每月股價
-    daily["month"] = (
-        daily["date"].dt.to_period("M").dt.to_timestamp()
+def render_daily_prices(daily):
+    high = daily.loc[daily["max"].idxmax()]
+    low = daily.loc[daily["min"].idxmin()]
+    average = daily["close"].mean()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("當月最高價", f"{high['max']:,.2f} 元")
+    c2.metric("當月最低價", f"{low['min']:,.2f} 元")
+    c3.metric("當月平均股價", f"{average:,.2f} 元")
+
+    chart = go.Figure(go.Scatter(
+        x=daily["date"], y=daily["close"], name="每日收盤價",
+        mode="lines+markers", line=dict(color="#2563eb", width=2.3),
+        marker=dict(size=5),
+        hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.2f} 元<extra>每日收盤價</extra>",
+    ))
+    for label, point, field, color, symbol in [
+        ("當月最高價", high, "max", "#b8384b", "triangle-up"),
+        ("當月最低價", low, "min", "#008068", "triangle-down"),
+    ]:
+        chart.add_trace(go.Scatter(
+            x=[point["date"]], y=[point[field]], name=label, mode="markers",
+            marker=dict(color=color, symbol=symbol, size=12),
+            hovertemplate=f"%{{x|%Y-%m-%d}}<br>%{{y:,.2f}} 元<extra>{label}</extra>",
+        ))
+    chart.add_hline(
+        y=average, line_color="#895c12", line_dash="dot",
+        name="平均收盤價", showlegend=True,
+    )
+    chart.update_layout(
+        xaxis_title="交易日期", yaxis_title="股價（新台幣元）", height=370,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=40, r=30, t=45, b=50),
+    )
+    chart.update_xaxes(type="date", tickformat="%m/%d")
+    st.plotly_chart(chart, use_container_width=True, config=CHART_CONFIG)
+    st.caption(
+        f"共 {len(daily)} 個有報價的交易日。"
+        "高低價採盤中成交價，平均股價是每日收盤價的算術平均。資料為未還原股價。"
     )
 
-    monthly = daily.groupby("month").agg(
-        月最高價=("max", "max"),
-        月最低價=("min", "min"),
-        月平均股價=("close", "mean")
-    )
-
-    return monthly.sort_index()
 
 with st.sidebar:
     st.header("查詢設定")
@@ -160,7 +183,7 @@ with st.sidebar:
 
 if refresh:
     fetch_revenue.clear()
-    fetch_monthly_price.clear()
+    fetch_daily_prices.clear()
 
 
 if not stock_query:
@@ -190,7 +213,7 @@ st.sidebar.success(
 )
 
 
-now = date.today()
+now = datetime.now(ZoneInfo("Asia/Taipei")).date()
 first_month = now.replace(day=1) - relativedelta(months=years * 12 - 1)
 # 為了在顯示區間第一個月有完整 MA12，並計算 MA3 YoY，往前抓 23 個月。
 fetch_start = first_month - relativedelta(months=23)
@@ -217,19 +240,15 @@ if valid.empty:
 latest_month = valid.index[-1]
 latest = valid.iloc[-1]
 
-st.subheader(
-    f"{stock_id} {stock_name}｜"
-    f"截至 {latest_month:%Y-%m} 的已取得營收"
-)
+st.subheader(f"{stock_id} {stock_name}")
+st.caption(f"最新已公布營收月份 {latest_month:%Y-%m}")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("最新月營收（億元）", f"{latest['月營收']:,.2f}")
 c2.metric("MA3（億元）", f"{latest['MA3']:,.2f}" if pd.notna(latest["MA3"]) else "—")
 c3.metric("MA12（億元）", f"{latest['MA12']:,.2f}" if pd.notna(latest["MA12"]) else "—")
 c4.metric("月營收 YoY", f"{latest['月營收YoY']:+.2f}%" if pd.notna(latest["月營收YoY"]) else "—")
 
-st.markdown(
-    f"### {stock_id} {stock_name}｜月營收與移動平均"
-)
+st.subheader("月營收與移動平均")
 
 fig = go.Figure()
 for enabled, column, color, width in [
@@ -247,29 +266,32 @@ for enabled, column, color, width in [
 fig.update_layout(
     title=None, xaxis_title="營收月份",
     yaxis_title="新台幣億元", hovermode="x unified", height=550,
-    legend=dict(orientation="h", y=1.08), margin=dict(l=40, r=30, t=35, b=50),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    margin=dict(l=40, r=30, t=45, b=50),
 )
 fig.update_xaxes(tickformat="%Y-%m", rangeslider_visible=True)
 st.plotly_chart(
     fig,
     use_container_width=True,
-    config={
-        "displayModeBar": "hover",
-        "displaylogo": False
-    }
+    config=CHART_CONFIG,
 )
 st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
 
 
-# ===== 月股價趨勢圖 =====
-
-st.markdown(
-    f"### {stock_id} {stock_name}｜月股價趨勢"
+st.subheader("所選月份的股價走勢")
+price_months = pd.date_range(first_month, now.replace(day=1), freq="MS")[::-1]
+selected_month = st.selectbox(
+    "交易月份",
+    price_months,
+    index=price_months.get_loc(latest_month),
+    format_func=lambda month: f"{month:%Y-%m}",
+    key=f"price-month-{stock_id}-{years}",
 )
 
+# 單月走勢與跨月統計共用同一次 FinMind 日股價查詢。
 try:
     with st.spinner("正在取得每日股價資料..."):
-        price_df = fetch_monthly_price(
+        daily_prices = fetch_daily_prices(
             stock_id,
             first_month.isoformat(),
             now.isoformat(),
@@ -278,15 +300,23 @@ try:
 
 except Exception as exc:
     st.warning(f"股價資料取得失敗：{exc}")
-    price_df = pd.DataFrame()
+    daily_prices = pd.DataFrame()
 
-if not price_df.empty:
+if not daily_prices.empty:
+    trading_months = daily_prices["date"].dt.to_period("M")
+    month_prices = daily_prices.loc[trading_months == selected_month.to_period("M")]
+    if month_prices.empty:
+        st.info("所選月份沒有可用的成交資料。")
+    else:
+        render_daily_prices(month_prices)
 
-    price_view = price_df.loc[
-        (price_df.index >= pd.Timestamp(first_month)) &
-        (price_df.index <= pd.Timestamp(now))
-    ].copy()
-
+    st.subheader("多月股價趨勢")
+    price_view = daily_prices.groupby(trading_months.dt.to_timestamp()).agg(
+        月最高價=("max", "max"),
+        月最低價=("min", "min"),
+        月平均股價=("close", "mean"),
+    )
+    price_view.index.name = "交易月份"
     price_fig = go.Figure()
 
     price_lines = [
@@ -321,11 +351,10 @@ if not price_df.empty:
         height=500,
         legend=dict(
             orientation="h",
-            y=1.08
+            yanchor="bottom",
+            y=1.02,
         ),
-        margin=dict(
-            l=40, r=30, t=35, b=50
-        )
+        margin=dict(l=40, r=30, t=45, b=50),
     )
 
     price_fig.update_xaxes(
@@ -340,10 +369,7 @@ if not price_df.empty:
     st.plotly_chart(
         price_fig,
         use_container_width=True,
-        config={
-            "displayModeBar": "hover",
-            "displaylogo": False
-        }
+        config=CHART_CONFIG,
     )
 
     st.caption(
@@ -373,8 +399,9 @@ if show_yoy:
         hovertemplate="%{x|%Y-%m}<br>%{y:+.2f}%<extra></extra>",
     ))
     yoy_fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    yoy_fig.update_layout(title="月營收年增率", yaxis_title="%", height=350)
-    st.plotly_chart(yoy_fig, use_container_width=True)
+    st.subheader("月營收年增率")
+    yoy_fig.update_layout(yaxis_title="%", height=350)
+    st.plotly_chart(yoy_fig, use_container_width=True, config=CHART_CONFIG)
 
 st.subheader("月營收明細")
 output = view[["月營收", "MA3", "MA12", "月營收YoY", "MA3 YoY"]].copy()
