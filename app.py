@@ -206,8 +206,8 @@ st.subheader("月營收與移動平均")
 fig = go.Figure()
 for enabled, column, color, width in [
     (show_revenue, "月營收", "#9ca3af", 1.8),
-    (show_ma3, "MA3", "#2563eb", 2.6),
-    (show_ma12, "MA12", "#dc2626", 3.0),
+    (show_ma3, "MA3", "#dc2626", 2.6),
+    (show_ma12, "MA12", "#2563eb", 3.0),
 ]:
     if enabled:
         fig.add_trace(go.Scatter(
