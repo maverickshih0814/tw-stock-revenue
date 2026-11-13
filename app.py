@@ -398,7 +398,7 @@ if not daily_prices.empty:
 else:
     st.info("目前沒有取得可用的股價資料。")
 
-st.subheader("所選日期範圍的股價走勢")
+st.subheader("外資買賣超與股價比較｜選擇日期範圍")
 # 預設選取最新已公布營收月份；日期範圍可自由跨月。
 default_start = max(first_month, latest_month.date())
 default_end = min(now, (latest_month + relativedelta(months=1, days=-1)).date())
@@ -426,9 +426,7 @@ else:
         ].copy()
     if period_prices.empty:
         st.info("所選日期範圍沒有可用的成交資料。")
-    else:
-        render_daily_prices(period_prices)
-    # 外資30交易日滾動買賣超與上述股價圖共用起訖日期。
+    # 外資圖內已有收盤價折線，不再另外繪製每日股價圖。
     render_foreign_cumulative(
         stock_id, stock_name, selected_start, selected_end, period_prices, get_token()
     )
