@@ -171,6 +171,19 @@ def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices
         st.info("所選月份沒有可對照的交易日。")
         return
 
+    # 依所選月份「實際顯示」的30日外資買賣超有效值設定左側Y軸。
+    foreign_visible = shown["30日外資買賣超張數"].dropna()
+    foreign_axis_range = None
+    if not foreign_visible.empty:
+        low = float(foreign_visible.min())
+        high = float(foreign_visible.max())
+        if high == low:
+            # 全部相同時仍保留可辨識的上下空間，避免零高度座標軸。
+            padding = max(abs(high) * 0.05, 1.0)
+        else:
+            padding = (high - low) * 0.05
+        foreign_axis_range = [low - padding, high + padding]
+
     fig_foreign = go.Figure()
     fig_foreign.add_trace(go.Scatter(
         x=shown["date"], y=shown["30日外資買賣超張數"],
@@ -187,7 +200,7 @@ def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices
     ))
     fig_foreign.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
     fig_foreign.update_layout(
-        xaxis_title="交易日期", yaxis=dict(title="近30交易日外資買賣超（張）"),
+        xaxis_title="交易日期", yaxis=dict(title="近30交易日外資買賣超（張）", range=foreign_axis_range),
         yaxis2=dict(title="收盤價（元）", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", height=440,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
