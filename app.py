@@ -127,18 +127,19 @@ def fetch_foreign_investors(stock_id, start_date, end_date, token):
     return foreign[["date", "當日外資買賣超張數"]].sort_values("date")
 
 
-def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period_prices, token):
-    """所選起訖日期內，每個交易日截至當日往前30個交易日的外資淨買賣超。"""
-    st.subheader("最近30個交易日外資累計買賣超張數")
+def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period_prices, token, trading_days):
+    """所選起訖日期內，每個交易日截至當日往前指定交易日數的外資淨買賣超。"""
+    st.subheader(f"最近{trading_days}個交易日外資累計買賣超張數")
     if period_prices.empty:
         st.info("所選日期範圍沒有股價交易日，無法對照外資買賣超。")
         return
 
-    # 從起始日再向前抓120日，確保區間首日有足夠的30交易日計算基礎。
-    start = start_date - relativedelta(days=120)
+    # 依使用者設定的交易日數向前抓取足夠的日曆天數（包含假日緩衝）。
+    lookback_calendar_days = max(120, int(trading_days * 2.2) + 45)
+    start = start_date - relativedelta(days=lookback_calendar_days)
     end = end_date
     try:
-        with st.spinner("正在計算所選日期範圍每日的30交易日外資買賣超..."):
+        with st.spinner(f"正在計算所選日期範圍每日的{trading_days}交易日外資買賣超..."):
             foreign = fetch_foreign_investors(
                 stock_id, start.isoformat(), end.isoformat(), token
             )
@@ -153,18 +154,20 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
         st.info("目前沒有可用的外資買賣超或歷史股價資料。")
         return
 
-    # 以實際股價交易日作為30日視窗基準，避免漏報的法人資料造成日期錯位。
+    # 以實際股價交易日作為滾動視窗基準，避免漏報的法人資料造成日期錯位。
     history = history_prices[["date", "close"]].merge(
         foreign, on="date", how="left", validate="one_to_one"
     ).sort_values("date").reset_index(drop=True)
-    history["30日外資買賣超張數"] = history["當日外資買賣超張數"].rolling(
-        window=30, min_periods=30
+    rolling_col = f"{trading_days}日外資買賣超張數"
+    valid_col = f"{trading_days}日有效資料筆數"
+    history[rolling_col] = history["當日外資買賣超張數"].rolling(
+        window=trading_days, min_periods=trading_days
     ).sum()
-    history["30日有效資料筆數"] = history["當日外資買賣超張數"].rolling(
-        window=30, min_periods=30
+    history[valid_col] = history["當日外資買賣超張數"].rolling(
+        window=trading_days, min_periods=trading_days
     ).count()
     # 缺少任何一日法人資料時不顯示不完整的30日合計。
-    history.loc[history["30日有效資料筆數"] < 30, "30日外資買賣超張數"] = float("nan")
+    history.loc[history[valid_col] < trading_days, rolling_col] = float("nan")
     mask = history["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))
     shown = history.loc[mask].copy()
     if shown.empty:
@@ -172,7 +175,7 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
         return
 
     # 依所選日期範圍「實際顯示」的30日外資買賣超有效值設定左側Y軸。
-    foreign_visible = shown["30日外資買賣超張數"].dropna()
+    foreign_visible = shown[rolling_col].dropna()
     foreign_axis_range = None
     if not foreign_visible.empty:
         low = float(foreign_visible.min())
@@ -186,10 +189,10 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
 
     fig_foreign = go.Figure()
     fig_foreign.add_trace(go.Scatter(
-        x=shown["date"], y=shown["30日外資買賣超張數"],
-        name="近30交易日外資買賣超（張）", mode="lines+markers",
-        line=dict(color="#16a34a", width=2.8), marker=dict(size=5),
-        hovertemplate="%{x|%Y-%m-%d}<br>30日合計 %{y:+,.1f} 張<extra>外資</extra>",
+        x=shown["date"], y=shown[rolling_col],
+        name=f"近{trading_days}交易日外資買賣超（張）", mode="lines+markers",
+        line=dict(color="#dc2626", width=2.8), marker=dict(size=5),
+        hovertemplate=f"%{{x|%Y-%m-%d}}<br>{trading_days}日合計 %{{y:+,.1f}} 張<extra>外資</extra>",
         connectgaps=False,
     ))
     fig_foreign.add_trace(go.Scatter(
@@ -200,7 +203,7 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
     ))
     fig_foreign.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
     fig_foreign.update_layout(
-        xaxis_title="交易日期", yaxis=dict(title="近30交易日外資買賣超（張）", range=foreign_axis_range),
+        xaxis_title="交易日期", yaxis=dict(title=f"近{trading_days}交易日外資買賣超（張）", range=foreign_axis_range),
         yaxis2=dict(title="收盤價（元）", overlaying="y", side="right", showgrid=False),
         hovermode="x unified", height=440,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
@@ -210,22 +213,22 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
     st.plotly_chart(fig_foreign, use_container_width=True, config=CHART_CONFIG)
     st.caption(
         f"{stock_id} {stock_name}｜{start_date:%Y-%m-%d} 至 {end_date:%Y-%m-%d} 各交易日，"
-        "分別計算截至當日（含當日）往前30個交易日的外資買賣超總和。"
+        f"分別計算截至當日（含當日）往前{trading_days}個交易日的外資買賣超總和。"
         "外資買賣超＝（買進股數－賣出股數）÷1,000，未包含外資自營商。"
         "左右軸單位不同，請比較趨勢而非線條高度。"
     )
-    missing = shown["30日外資買賣超張數"].isna().sum()
+    missing = shown[rolling_col].isna().sum()
     if missing:
-        st.warning(f"所選日期範圍有 {missing} 個交易日缺少完整30日法人資料，對應數值留空，避免誤導。")
-    with st.expander("查看所選日期範圍每日30交易日外資買賣超明細"):
-        detail = shown[["date", "close", "當日外資買賣超張數", "30日外資買賣超張數"]].rename(
+        st.warning(f"所選日期範圍有 {missing} 個交易日缺少完整{trading_days}日法人資料，對應數值留空，避免誤導。")
+    with st.expander(f"查看所選日期範圍每日{trading_days}交易日外資買賣超明細"):
+        detail = shown[["date", "close", "當日外資買賣超張數", rolling_col]].rename(
             columns={"date": "交易日期", "close": "收盤價（元）"}
         )
         st.dataframe(
             detail.iloc[::-1].style.format({
                 "收盤價（元）": "{:,.2f}",
                 "當日外資買賣超張數": "{:+,.1f}",
-                "30日外資買賣超張數": "{:+,.1f}",
+                rolling_col: "{:+,.1f}",
             }, na_rep="—"), use_container_width=True, hide_index=True
         )
 
@@ -405,7 +408,7 @@ default_end = min(now, (latest_month + relativedelta(months=1, days=-1)).date())
 if default_end < default_start:
     default_start = max(first_month, now - relativedelta(days=30))
     default_end = now
-start_col, end_col = st.columns(2)
+start_col, end_col, days_col = st.columns([2, 2, 1])
 with start_col:
     selected_start = st.date_input(
         "起始日期", value=default_start, min_value=first_month,
@@ -415,6 +418,11 @@ with end_col:
     selected_end = st.date_input(
         "結束日期", value=default_end, min_value=first_month,
         max_value=now, key=f"price-end-{stock_id}-{years}",
+    )
+with days_col:
+    trading_days = st.number_input(
+        "累計交易日數", min_value=1, max_value=250, value=30, step=1,
+        help="每個顯示日期分別累計截至當日往前 N 個交易日的外資買賣超。",
     )
 if selected_start > selected_end:
     st.warning("起始日期不可晚於結束日期，請重新選擇日期。")
@@ -428,7 +436,7 @@ else:
         st.info("所選日期範圍沒有可用的成交資料。")
     # 外資圖內已有收盤價折線，不再另外繪製每日股價圖。
     render_foreign_cumulative(
-        stock_id, stock_name, selected_start, selected_end, period_prices, get_token()
+        stock_id, stock_name, selected_start, selected_end, period_prices, get_token(), int(trading_days)
     )
 
 if show_yoy:
