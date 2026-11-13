@@ -140,10 +140,10 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
     try:
         with st.spinner("正在計算所選日期範圍每日的30交易日外資買賣超..."):
             foreign = fetch_foreign_investors(
-                stock_id, start.date().isoformat(), end.date().isoformat(), token
+                stock_id, start.isoformat(), end.isoformat(), token
             )
             history_prices = fetch_daily_prices(
-                stock_id, start.date().isoformat(), end.date().isoformat(), token
+                stock_id, start.isoformat(), end.isoformat(), token
             )
     except Exception as exc:
         st.warning(f"外資買賣超資料取得失敗：{exc}")
