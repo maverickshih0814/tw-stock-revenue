@@ -127,18 +127,18 @@ def fetch_foreign_investors(stock_id, start_date, end_date, token):
     return foreign[["date", "當日外資買賣超張數"]].sort_values("date")
 
 
-def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices, token):
-    """所選月份每一交易日，截至當日往前30個交易日的外資淨買賣超。"""
+def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period_prices, token):
+    """所選起訖日期內，每個交易日截至當日往前30個交易日的外資淨買賣超。"""
     st.subheader("最近30個交易日外資累計買賣超張數")
-    if month_prices.empty:
-        st.info("所選月份沒有股價交易日，無法對照外資買賣超。")
+    if period_prices.empty:
+        st.info("所選日期範圍沒有股價交易日，無法對照外資買賣超。")
         return
 
-    # 多抓月初以前的歷史資料，確保第一個交易日也能計算完整30日視窗。
-    start = selected_month - relativedelta(days=120)
-    end = selected_month + relativedelta(months=1, days=-1)
+    # 從起始日再向前抓120日，確保區間首日有足夠的30交易日計算基礎。
+    start = start_date - relativedelta(days=120)
+    end = end_date
     try:
-        with st.spinner("正在計算所選月份每日的30交易日外資買賣超..."):
+        with st.spinner("正在計算所選日期範圍每日的30交易日外資買賣超..."):
             foreign = fetch_foreign_investors(
                 stock_id, start.date().isoformat(), end.date().isoformat(), token
             )
@@ -165,13 +165,13 @@ def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices
     ).count()
     # 缺少任何一日法人資料時不顯示不完整的30日合計。
     history.loc[history["30日有效資料筆數"] < 30, "30日外資買賣超張數"] = float("nan")
-    mask = history["date"].dt.to_period("M") == selected_month.to_period("M")
+    mask = history["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))
     shown = history.loc[mask].copy()
     if shown.empty:
-        st.info("所選月份沒有可對照的交易日。")
+        st.info("所選日期範圍沒有可對照的交易日。")
         return
 
-    # 依所選月份「實際顯示」的30日外資買賣超有效值設定左側Y軸。
+    # 依所選日期範圍「實際顯示」的30日外資買賣超有效值設定左側Y軸。
     foreign_visible = shown["30日外資買賣超張數"].dropna()
     foreign_axis_range = None
     if not foreign_visible.empty:
@@ -209,15 +209,15 @@ def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices
     fig_foreign.update_xaxes(type="date", tickformat="%m/%d")
     st.plotly_chart(fig_foreign, use_container_width=True, config=CHART_CONFIG)
     st.caption(
-        f"{stock_id} {stock_name}｜{selected_month:%Y-%m} 各交易日，"
+        f"{stock_id} {stock_name}｜{start_date:%Y-%m-%d} 至 {end_date:%Y-%m-%d} 各交易日，"
         "分別計算截至當日（含當日）往前30個交易日的外資買賣超總和。"
         "外資買賣超＝（買進股數－賣出股數）÷1,000，未包含外資自營商。"
         "左右軸單位不同，請比較趨勢而非線條高度。"
     )
     missing = shown["30日外資買賣超張數"].isna().sum()
     if missing:
-        st.warning(f"所選月份有 {missing} 個交易日缺少完整30日法人資料，對應數值留空，避免誤導。")
-    with st.expander("查看所選月份每日30交易日外資買賣超明細"):
+        st.warning(f"所選日期範圍有 {missing} 個交易日缺少完整30日法人資料，對應數值留空，避免誤導。")
+    with st.expander("查看所選日期範圍每日30交易日外資買賣超明細"):
         detail = shown[["date", "close", "當日外資買賣超張數", "30日外資買賣超張數"]].rename(
             columns={"date": "交易日期", "close": "收盤價（元）"}
         )
@@ -235,9 +235,9 @@ def render_daily_prices(daily):
     low = daily.loc[daily["min"].idxmin()]
     average = daily["close"].mean()
     c1, c2, c3 = st.columns(3)
-    c1.metric("當月最高價", f"{high['max']:,.2f} 元")
-    c2.metric("當月最低價", f"{low['min']:,.2f} 元")
-    c3.metric("當月平均股價", f"{average:,.2f} 元")
+    c1.metric("區間最高價", f"{high['max']:,.2f} 元")
+    c2.metric("區間最低價", f"{low['min']:,.2f} 元")
+    c3.metric("區間平均股價", f"{average:,.2f} 元")
     chart = go.Figure(go.Scatter(
         x=daily["date"], y=daily["close"], name="每日收盤價", mode="lines+markers",
         line=dict(color="#2563eb", width=2.3), marker=dict(size=5),
@@ -398,23 +398,40 @@ if not daily_prices.empty:
 else:
     st.info("目前沒有取得可用的股價資料。")
 
-st.subheader("所選月份的股價走勢")
-price_months = pd.date_range(first_month, now.replace(day=1), freq="MS")[::-1]
-selected_month = st.selectbox(
-    "交易月份", price_months,
-    index=price_months.get_loc(latest_month),
-    format_func=lambda month: f"{month:%Y-%m}",
-    key=f"price-month-{stock_id}-{years}",
-)
-month_prices = pd.DataFrame()
-if not daily_prices.empty:
-    month_prices = daily_prices.loc[trading_months == selected_month.to_period("M")]
-    if month_prices.empty:
-        st.info("所選月份沒有可用的成交資料。")
+st.subheader("所選日期範圍的股價走勢")
+# 預設選取最新已公布營收月份；日期範圍可自由跨月。
+default_start = max(first_month, latest_month.date())
+default_end = min(now, (latest_month + relativedelta(months=1, days=-1)).date())
+if default_end < default_start:
+    default_start = max(first_month, now - relativedelta(days=30))
+    default_end = now
+start_col, end_col = st.columns(2)
+with start_col:
+    selected_start = st.date_input(
+        "起始日期", value=default_start, min_value=first_month,
+        max_value=now, key=f"price-start-{stock_id}-{years}",
+    )
+with end_col:
+    selected_end = st.date_input(
+        "結束日期", value=default_end, min_value=first_month,
+        max_value=now, key=f"price-end-{stock_id}-{years}",
+    )
+if selected_start > selected_end:
+    st.warning("起始日期不可晚於結束日期，請重新選擇日期。")
+else:
+    period_prices = pd.DataFrame()
+    if not daily_prices.empty:
+        period_prices = daily_prices.loc[
+            daily_prices["date"].between(pd.Timestamp(selected_start), pd.Timestamp(selected_end))
+        ].copy()
+    if period_prices.empty:
+        st.info("所選日期範圍沒有可用的成交資料。")
     else:
-        render_daily_prices(month_prices)
-# ===== 外資籌碼：與所選月份的每日股價逐日對照 =====
-render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices, get_token())
+        render_daily_prices(period_prices)
+    # 外資30交易日滾動買賣超與上述股價圖共用起訖日期。
+    render_foreign_cumulative(
+        stock_id, stock_name, selected_start, selected_end, period_prices, get_token()
+    )
 
 if show_yoy:
     yoy_fig = go.Figure(go.Scatter(
