@@ -99,6 +99,124 @@ def fetch_daily_prices(stock_id, start_date, end_date, token):
             .drop_duplicates("date", keep="last"))
 
 
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def fetch_foreign_investors(stock_id, start_date, end_date, token):
+    """取得外資（不含外資自營商）每日買賣超，原始單位為股。"""
+    api = DataLoader()
+    if token:
+        api.login_by_token(api_token=token)
+    raw = api.taiwan_stock_institutional_investors(
+        stock_id=stock_id, start_date=start_date, end_date=end_date
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    required = {"date", "name", "buy", "sell"}
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(f"FinMind 法人資料缺少欄位：{', '.join(sorted(missing))}")
+    foreign = raw.loc[raw["name"] == "Foreign_Investor", ["date", "buy", "sell"]].copy()
+    if foreign.empty:
+        return pd.DataFrame()
+    foreign["date"] = pd.to_datetime(foreign["date"], errors="coerce").dt.normalize()
+    foreign["buy"] = pd.to_numeric(foreign["buy"], errors="coerce")
+    foreign["sell"] = pd.to_numeric(foreign["sell"], errors="coerce")
+    foreign = foreign.dropna(subset=["date", "buy", "sell"])
+    foreign = foreign.groupby("date", as_index=False)[["buy", "sell"]].sum()
+    foreign["當日外資買賣超張數"] = (foreign["buy"] - foreign["sell"]) / 1000
+    return foreign[["date", "當日外資買賣超張數"]].sort_values("date")
+
+
+def render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices, token):
+    """所選月份每一交易日，截至當日往前30個交易日的外資淨買賣超。"""
+    st.subheader("最近30個交易日外資累計買賣超張數")
+    if month_prices.empty:
+        st.info("所選月份沒有股價交易日，無法對照外資買賣超。")
+        return
+
+    # 多抓月初以前的歷史資料，確保第一個交易日也能計算完整30日視窗。
+    start = selected_month - relativedelta(days=120)
+    end = selected_month + relativedelta(months=1, days=-1)
+    try:
+        with st.spinner("正在計算所選月份每日的30交易日外資買賣超..."):
+            foreign = fetch_foreign_investors(
+                stock_id, start.date().isoformat(), end.date().isoformat(), token
+            )
+            history_prices = fetch_daily_prices(
+                stock_id, start.date().isoformat(), end.date().isoformat(), token
+            )
+    except Exception as exc:
+        st.warning(f"外資買賣超資料取得失敗：{exc}")
+        return
+
+    if foreign.empty or history_prices.empty:
+        st.info("目前沒有可用的外資買賣超或歷史股價資料。")
+        return
+
+    # 以實際股價交易日作為30日視窗基準，避免漏報的法人資料造成日期錯位。
+    history = history_prices[["date", "close"]].merge(
+        foreign, on="date", how="left", validate="one_to_one"
+    ).sort_values("date").reset_index(drop=True)
+    history["30日外資買賣超張數"] = history["當日外資買賣超張數"].rolling(
+        window=30, min_periods=30
+    ).sum()
+    history["30日有效資料筆數"] = history["當日外資買賣超張數"].rolling(
+        window=30, min_periods=30
+    ).count()
+    # 缺少任何一日法人資料時不顯示不完整的30日合計。
+    history.loc[history["30日有效資料筆數"] < 30, "30日外資買賣超張數"] = float("nan")
+    mask = history["date"].dt.to_period("M") == selected_month.to_period("M")
+    shown = history.loc[mask].copy()
+    if shown.empty:
+        st.info("所選月份沒有可對照的交易日。")
+        return
+
+    fig_foreign = go.Figure()
+    fig_foreign.add_trace(go.Scatter(
+        x=shown["date"], y=shown["30日外資買賣超張數"],
+        name="近30交易日外資買賣超（張）", mode="lines+markers",
+        line=dict(color="#16a34a", width=2.8), marker=dict(size=5),
+        hovertemplate="%{x|%Y-%m-%d}<br>30日合計 %{y:+,.1f} 張<extra>外資</extra>",
+        connectgaps=False,
+    ))
+    fig_foreign.add_trace(go.Scatter(
+        x=shown["date"], y=shown["close"],
+        name="每日收盤價（元）", mode="lines+markers", yaxis="y2",
+        line=dict(color="#2563eb", width=2.2), marker=dict(size=4),
+        hovertemplate="%{x|%Y-%m-%d}<br>收盤 %{y:,.2f} 元<extra>股價</extra>",
+    ))
+    fig_foreign.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+    fig_foreign.update_layout(
+        xaxis_title="交易日期", yaxis=dict(title="近30交易日外資買賣超（張）"),
+        yaxis2=dict(title="收盤價（元）", overlaying="y", side="right", showgrid=False),
+        hovermode="x unified", height=440,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=55, r=55, t=45, b=50),
+    )
+    fig_foreign.update_xaxes(type="date", tickformat="%m/%d")
+    st.plotly_chart(fig_foreign, use_container_width=True, config=CHART_CONFIG)
+    st.caption(
+        f"{stock_id} {stock_name}｜{selected_month:%Y-%m} 各交易日，"
+        "分別計算截至當日（含當日）往前30個交易日的外資買賣超總和。"
+        "外資買賣超＝（買進股數－賣出股數）÷1,000，未包含外資自營商。"
+        "左右軸單位不同，請比較趨勢而非線條高度。"
+    )
+    missing = shown["30日外資買賣超張數"].isna().sum()
+    if missing:
+        st.warning(f"所選月份有 {missing} 個交易日缺少完整30日法人資料，對應數值留空，避免誤導。")
+    with st.expander("查看所選月份每日30交易日外資買賣超明細"):
+        detail = shown[["date", "close", "當日外資買賣超張數", "30日外資買賣超張數"]].rename(
+            columns={"date": "交易日期", "close": "收盤價（元）"}
+        )
+        st.dataframe(
+            detail.iloc[::-1].style.format({
+                "收盤價（元）": "{:,.2f}",
+                "當日外資買賣超張數": "{:+,.1f}",
+                "30日外資買賣超張數": "{:+,.1f}",
+            }, na_rep="—"), use_container_width=True, hide_index=True
+        )
+
+
 def render_daily_prices(daily):
     high = daily.loc[daily["max"].idxmax()]
     low = daily.loc[daily["min"].idxmin()]
@@ -156,6 +274,7 @@ st.caption("如有 FinMind Token，可在 Streamlit Cloud 的 Secrets 設定 FIN
 if refresh:
     fetch_revenue.clear()
     fetch_daily_prices.clear()
+    fetch_foreign_investors.clear()
     fetch_stock_info.clear()
 
 if not stock_query:
@@ -207,7 +326,7 @@ fig = go.Figure()
 for enabled, column, color, width in [
     (show_revenue, "月營收", "#9ca3af", 1.8),
     (show_ma3, "MA3", "#dc2626", 2.6),
-    (show_ma12, "MA12", "#16a34a", 3.0),
+    (show_ma12, "MA12", "#2563eb", 3.0),
 ]:
     if enabled:
         fig.add_trace(go.Scatter(
@@ -274,12 +393,16 @@ selected_month = st.selectbox(
     format_func=lambda month: f"{month:%Y-%m}",
     key=f"price-month-{stock_id}-{years}",
 )
+month_prices = pd.DataFrame()
 if not daily_prices.empty:
     month_prices = daily_prices.loc[trading_months == selected_month.to_period("M")]
     if month_prices.empty:
         st.info("所選月份沒有可用的成交資料。")
     else:
         render_daily_prices(month_prices)
+# ===== 外資籌碼：與所選月份的每日股價逐日對照 =====
+render_foreign_cumulative(stock_id, stock_name, selected_month, month_prices, get_token())
+
 if show_yoy:
     yoy_fig = go.Figure(go.Scatter(
         x=view.index, y=view["月營收YoY"], mode="lines+markers", name="月營收 YoY",
