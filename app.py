@@ -233,6 +233,116 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
         )
 
 
+
+def render_predictive_test(stock_id, stock_name, start_date, end_date, token, trading_days):
+    """在所選日期範圍內，檢驗近N日外資買賣超與未來N交易日報酬的關係。"""
+    st.subheader(f"外資近{trading_days}日買賣超 vs. 未來{trading_days}交易日報酬率")
+    st.caption("訊號日 t：截至 t（含當日）的近 N 個交易日外資淨買賣超；"
+               "結果：從 t 日收盤到第 N 個後續交易日收盤的報酬率。"
+               "僅採用未來價格已知的歷史樣本。")
+
+    # 前方須有 N 個交易日，後方須有 N 個交易日；後方查到今天即可。
+    calendar_buffer = max(120, int(trading_days * 2.2) + 45)
+    fetch_start = start_date - relativedelta(days=calendar_buffer)
+    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    fetch_end = min(today, end_date + relativedelta(days=calendar_buffer))
+    try:
+        with st.spinner("正在計算外資訊號與未來報酬..."):
+            prices = fetch_daily_prices(stock_id, fetch_start.isoformat(),
+                                        fetch_end.isoformat(), token)
+            foreign = fetch_foreign_investors(stock_id, fetch_start.isoformat(),
+                                              min(end_date, today).isoformat(), token)
+    except Exception as exc:
+        st.warning(f"回測資料取得失敗：{exc}")
+        return
+    if prices.empty or foreign.empty:
+        st.info("沒有足夠的股價或外資資料可供回測。")
+        return
+
+    df = prices[["date", "close"]].merge(
+        foreign, on="date", how="left", validate="one_to_one"
+    ).sort_values("date").reset_index(drop=True)
+    col = f"近{trading_days}日外資淨買賣超（張）"
+    ret_col = f"未來{trading_days}日報酬率（%）"
+    df[col] = df["當日外資買賣超張數"].rolling(
+        trading_days, min_periods=trading_days
+    ).sum()
+    df[ret_col] = (df["close"].shift(-trading_days) / df["close"] - 1) * 100
+    df["未來到期日"] = df["date"].shift(-trading_days)
+    df = df.loc[df["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
+    df = df.dropna(subset=[col, ret_col, "未來到期日"]).copy()
+
+    if len(df) < 5:
+        st.info("有效樣本少於5筆。請擴大日期區間，或減少 N；"
+                "接近今天的日期因未來 N 日尚未發生，會自動排除。")
+        return
+
+    pearson = df[col].corr(df[ret_col], method="pearson")
+    spearman = df[col].corr(df[ret_col], method="spearman")
+    positive = df[col] > 0
+    negative = df[col] < 0
+    avg_pos = df.loc[positive, ret_col].mean()
+    avg_neg = df.loc[negative, ret_col].mean()
+    a, b, c, d = st.columns(4)
+    a.metric("有效訊號日", f"{len(df)}")
+    b.metric("Pearson 相關係數", f"{pearson:.3f}" if pd.notna(pearson) else "無法計算")
+    c.metric("Spearman 等級相關", f"{spearman:.3f}" if pd.notna(spearman) else "無法計算")
+    d.metric("買超日後續平均報酬", f"{avg_pos:+.2f}%" if pd.notna(avg_pos) else "無樣本")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df[col], y=df[ret_col], mode="markers", name="歷史訊號日",
+        marker=dict(color="#dc2626", size=8, opacity=0.65),
+        customdata=df["date"].dt.strftime("%Y-%m-%d"),
+        hovertemplate="訊號日 %{customdata}<br>外資 %{x:+,.0f} 張"
+                      "<br>未來報酬 %{y:+.2f}%<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+    fig.add_vline(x=0, line_dash="dot", line_color="#9ca3af")
+    fig.update_layout(
+        xaxis_title=col, yaxis_title=ret_col, height=430,
+        margin=dict(l=50, r=25, t=25, b=55),
+    )
+    st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
+
+    summary = pd.DataFrame({
+        "訊號類別": ["近N日累計買超（>0）", "近N日累計賣超（<0）"],
+        "樣本數": [int(positive.sum()), int(negative.sum())],
+        "未來N日平均報酬（%）": [avg_pos, avg_neg],
+        "未來N日上漲比例（%）": [
+            df.loc[positive, ret_col].gt(0).mean() * 100 if positive.any() else float("nan"),
+            df.loc[negative, ret_col].gt(0).mean() * 100 if negative.any() else float("nan"),
+        ],
+    })
+    st.dataframe(summary.style.format({
+        "未來N日平均報酬（%）": "{:+.2f}",
+        "未來N日上漲比例（%）": "{:.1f}",
+    }, na_rep="—"), use_container_width=True, hide_index=True)
+
+    if pd.notna(avg_pos) and pd.notna(avg_neg):
+        st.write(f"買超訊號與賣超訊號的未來平均報酬差：**{avg_pos - avg_neg:+.2f} 個百分點**。")
+
+    with st.expander("查看逐日回測資料與下載 CSV"):
+        detail = df[["date", col, "close", "未來到期日", ret_col]].rename(
+            columns={"date": "訊號日", "close": "訊號日收盤價"}
+        )
+        st.dataframe(detail.iloc[::-1], use_container_width=True, hide_index=True)
+        st.download_button(
+            "下載回測資料 CSV",
+            detail.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"{stock_id}_foreign_{trading_days}d_forward_return.csv",
+            mime="text/csv",
+        )
+
+    st.warning(
+        "這是探索性相關分析，不等於已證實有預測力。相鄰日期的 N 日視窗高度重疊，"
+        "樣本不獨立，相關係數及平均報酬可能被趨勢與極端值影響；"
+        "此外使用當日外資資料與當日收盤價計算，並不代表可在當日收盤前取得完整訊號。"
+        "報酬採未還原收盤價，不含股利、交易成本與滑價。"
+        "建議進一步用不重疊樣本、不同市場階段與樣本外期間驗證。"
+    )
+
+
 def render_daily_prices(daily):
     high = daily.loc[daily["max"].idxmax()]
     low = daily.loc[daily["min"].idxmin()]
@@ -437,6 +547,9 @@ else:
     # 外資圖內已有收盤價折線，不再另外繪製每日股價圖。
     render_foreign_cumulative(
         stock_id, stock_name, selected_start, selected_end, period_prices, get_token(), int(trading_days)
+    )
+    render_predictive_test(
+        stock_id, stock_name, selected_start, selected_end, get_token(), int(trading_days)
     )
 
 if show_yoy:
