@@ -278,7 +278,7 @@ def render_predictive_test(stock_id, stock_name, start_date, end_date, token, tr
         return
 
     pearson = df[col].corr(df[ret_col], method="pearson")
-    spearman = df[col].corr(df[ret_col], method="spearman")
+    spearman = df[col].rank().corr(df[ret_col].rank(), method="pearson")
     positive = df[col] > 0
     negative = df[col] < 0
     avg_pos = df.loc[positive, ret_col].mean()
