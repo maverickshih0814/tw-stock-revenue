@@ -187,19 +187,22 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
             padding = (high - low) * 0.05
         foreign_axis_range = [low - padding, high + padding]
 
+    # 將交易日期轉成類別軸標籤：休市日不占用 X 軸間距。
+    # 兩條折線共用同一組標籤，確保外資與股價逐日對齊。
+    trading_date_labels = shown["date"].dt.strftime("%Y-%m-%d")
     fig_foreign = go.Figure()
     fig_foreign.add_trace(go.Scatter(
-        x=shown["date"], y=shown[rolling_col],
+        x=trading_date_labels, y=shown[rolling_col],
         name=f"近{trading_days}交易日外資買賣超（張）", mode="lines+markers",
         line=dict(color="#dc2626", width=2.8), marker=dict(size=5),
-        hovertemplate=f"%{{x|%Y-%m-%d}}<br>{trading_days}日合計 %{{y:+,.1f}} 張<extra>外資</extra>",
+        hovertemplate=f"%{{x}}<br>{trading_days}日合計 %{{y:+,.1f}} 張<extra>外資</extra>",
         connectgaps=False,
     ))
     fig_foreign.add_trace(go.Scatter(
-        x=shown["date"], y=shown["close"],
+        x=trading_date_labels, y=shown["close"],
         name="每日收盤價（元）", mode="lines+markers", yaxis="y2",
         line=dict(color="#2563eb", width=2.2), marker=dict(size=4),
-        hovertemplate="%{x|%Y-%m-%d}<br>收盤 %{y:,.2f} 元<extra>股價</extra>",
+        hovertemplate="%{x}<br>收盤 %{y:,.2f} 元<extra>股價</extra>",
     ))
     fig_foreign.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
     fig_foreign.update_layout(
@@ -209,7 +212,13 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         margin=dict(l=55, r=55, t=45, b=50),
     )
-    fig_foreign.update_xaxes(type="date", tickformat="%m/%d")
+    fig_foreign.update_xaxes(
+        type="category",
+        categoryorder="array",
+        categoryarray=trading_date_labels.tolist(),
+        tickangle=-45,
+        nticks=16,
+    )
     st.plotly_chart(fig_foreign, use_container_width=True, config=CHART_CONFIG)
     st.caption(
         f"{stock_id} {stock_name}｜{start_date:%Y-%m-%d} 至 {end_date:%Y-%m-%d} 各交易日，"
