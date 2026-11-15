@@ -242,6 +242,200 @@ def render_foreign_cumulative(stock_id, stock_name, start_date, end_date, period
         )
 
 
+
+def render_revenue_insights(revenue):
+    """以已公布月營收、MA3、MA12，產生可追溯的規則式趨勢歸納。"""
+    st.markdown("#### 營收趨勢歸納")
+    valid = revenue.dropna(subset=["月營收"]).sort_index()
+    if valid.empty:
+        st.info("目前沒有足夠的營收資料可供分析。")
+        return
+
+    current = valid.iloc[-1]
+    month = valid.index[-1]
+    notes = []
+
+    def number(value):
+        return f"{value:,.2f}"
+
+    def pct(value):
+        return f"{value:+.1f}%"
+
+    def change(new, old):
+        if pd.isna(new) or pd.isna(old) or old == 0:
+            return None
+        return (new / old - 1) * 100
+
+    # 月營收與年增率：月增率只在相鄰兩個日曆月份都有資料時才計算。
+    notes.append(f"**最新月份（{month:%Y/%m}）**：營收 {number(current['月營收'])} 億元。")
+    prev_month = month - pd.DateOffset(months=1)
+    if prev_month in revenue.index and pd.notna(revenue.loc[prev_month, "月營收"]):
+        mom = change(current["月營收"], revenue.loc[prev_month, "月營收"])
+        if mom is not None:
+            notes.append(f"**月增率（MoM）**：{pct(mom)}；單月變化可能受到工作天數、出貨節奏及季節性影響。")
+
+    yoy = current["月營收YoY"]
+    if pd.notna(yoy):
+        notes.append(f"**年增率（YoY）**：{pct(yoy)}，"
+                     + ("高於去年同期。" if yoy > 0 else "低於去年同期。" if yoy < 0 else "與去年同期持平。"))
+        if prev_month in revenue.index:
+            prev_yoy = revenue.loc[prev_month, "月營收YoY"]
+            if pd.notna(prev_yoy):
+                diff = yoy - prev_yoy
+                notes.append(f"**年增率動能**：較前一個月"
+                             f"{'提高' if diff > 0 else '下降' if diff < 0 else '持平'}"
+                             f" {abs(diff):.1f} 個百分點；"
+                             "這是成長速度的變化，不等於營收絕對值同幅增減。")
+
+    # 3月與12月均線變化：使用連續日曆月份，避免資料缺漏造成錯判。
+    for col, label in [("MA3", "3 個月平均營收"), ("MA12", "12 個月平均營收")]:
+        value = current[col]
+        if pd.isna(value):
+            notes.append(f"**{label}**：資料尚不足，無法判斷趨勢。")
+            continue
+        note = f"**{label}**：{number(value)} 億元"
+        if prev_month in revenue.index:
+            prev = revenue.loc[prev_month, col]
+            delta = change(value, prev)
+            if delta is not None:
+                direction = "上升" if delta > 0 else "下降" if delta < 0 else "持平"
+                note += f"，較上月{direction} {abs(delta):.1f}%"
+        notes.append(note + "。")
+
+    ma3, ma12 = current["MA3"], current["MA12"]
+    rev = current["月營收"]
+    if pd.notna(ma3):
+        gap = change(rev, ma3)
+        if gap is not None:
+            notes.append(
+                f"**當月營收相對短期均線**："
+                f"{'高於' if gap > 0 else '低於' if gap < 0 else '等於'} MA3"
+                f"{f' {abs(gap):.1f}%' if gap != 0 else ''}；"
+                + ("近期單月表現高於近三個月平均。" if gap > 0 else
+                   "近期單月表現低於近三個月平均。" if gap < 0 else
+                   "與近三個月平均相當。")
+            )
+    if pd.notna(ma3) and pd.notna(ma12):
+        spread = change(ma3, ma12)
+        if spread is not None:
+            notes.append(
+                f"**短中期結構**：MA3 "
+                f"{'高於' if spread > 0 else '低於' if spread < 0 else '等於'} MA12"
+                f"{f' {abs(spread):.1f}%' if spread != 0 else ''}；"
+                + ("近三個月平均營收高於近一年水準，短期營收動能相對較強。" if spread > 0 else
+                   "近三個月平均營收低於近一年水準，短期營收動能相對較弱。" if spread < 0 else
+                   "短期與全年平均營收接近。")
+            )
+
+    # 連續月數只檢查 MA3，且不得跨過缺失月份。
+    if pd.notna(ma3):
+        consecutive = 0
+        direction = None
+        cursor = month
+        while consecutive < 12:
+            previous = cursor - pd.DateOffset(months=1)
+            if previous not in revenue.index:
+                break
+            now_val = revenue.loc[cursor, "MA3"]
+            prev_val = revenue.loc[previous, "MA3"]
+            if pd.isna(now_val) or pd.isna(prev_val) or now_val == prev_val:
+                break
+            step_direction = "上升" if now_val > prev_val else "下降"
+            if direction is None:
+                direction = step_direction
+            elif direction != step_direction:
+                break
+            consecutive += 1
+            cursor = previous
+        if consecutive >= 2:
+            suffix = "以上" if consecutive == 12 else ""
+            notes.append(f"**短期趨勢持續性**：MA3 已連續 {consecutive} 個月{suffix}{direction}。")
+
+    for note in notes:
+        st.markdown("- " + note)
+
+    st.caption("以上為依歷史營收數值自動產生的規則式分析，並非 AI 預測或投資建議。"
+               "月營收及移動平均可能受季節性、工作天數、併購與認列時點影響；"
+               "MA3／MA12 是落後指標，無法單獨判斷未來獲利或股價。")
+
+
+def render_growth_driver_analysis(revenue):
+    """以本年與去年相鄰月份的營收，拆解 YoY 變化的數學來源。"""
+    st.markdown("#### 營收成長加速／減速原因分析")
+    valid = revenue.dropna(subset=["月營收"]).sort_index()
+    if valid.empty:
+        st.info("尚無月營收資料可供分析。")
+        return
+
+    t = valid.index[-1]
+    dates = [t - pd.DateOffset(months=n) for n in (0, 1, 12, 13)]
+    if any(d not in revenue.index or pd.isna(revenue.loc[d, "月營收"])
+           or revenue.loc[d, "月營收"] <= 0 for d in dates):
+        st.info("需要本月、上月，以及去年對應的兩個月份均有正值營收，才能拆解年增率變化。")
+        return
+
+    a, b, c, d = [float(revenue.loc[date, "月營收"]) for date in dates]
+    this_mom = (a / b - 1) * 100
+    last_mom = (c / d - 1) * 100
+    this_yoy = (a / c - 1) * 100
+    prev_yoy = (b / d - 1) * 100
+    yoy_delta = this_yoy - prev_yoy
+
+    comparison = pd.DataFrame([
+        {"比較月份": f"去年 {dates[3]:%Y/%m}", "月營收（億元）": d},
+        {"比較月份": f"去年 {dates[2]:%Y/%m}", "月營收（億元）": c},
+        {"比較月份": f"今年 {dates[1]:%Y/%m}", "月營收（億元）": b},
+        {"比較月份": f"今年 {dates[0]:%Y/%m}", "月營收（億元）": a},
+    ])
+    with st.expander("查看今年與去年同期營收比較", expanded=False):
+        st.dataframe(comparison.style.format({"月營收（億元）": "{:,.2f}"}),
+                     use_container_width=True, hide_index=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("今年本月月增率", f"{this_mom:+.1f}%")
+    c2.metric("去年同期月增率", f"{last_mom:+.1f}%")
+    c3.metric("YoY 較上月變化", f"{yoy_delta:+.1f} 個百分點")
+
+    # 使用對數成長率精確拆解：
+    # log[(1+YoY_t)/(1+YoY_t-1)] = log(當年月增倍數) - log(去年同期月增倍數)。
+    # 不將百分點直接相減當作精確貢獻，避免非線性誤差。
+    import math
+    current_effect = math.log(a / b)
+    base_effect = -math.log(c / d)
+    net_effect = current_effect + base_effect
+    tol = 1e-10
+
+    if abs(net_effect) < tol:
+        st.markdown("**歸納：** YoY 與上月幾乎持平，當期變化與去年比較基期的影響大致抵銷。")
+    else:
+        accelerating = net_effect > 0
+        direction = "加速" if accelerating else "放緩"
+        st.markdown(f"**歸納：** 本月 YoY 為 **{this_yoy:+.1f}%**，上月為 **{prev_yoy:+.1f}%**，"
+                    f"年增率較上月**{direction} {abs(yoy_delta):.1f} 個百分點**。")
+
+        current_supports = current_effect * net_effect > tol
+        base_supports = base_effect * net_effect > tol
+        if current_supports and base_supports:
+            interpretation = "今年營收的月度變化與去年比較基期變化，都朝同一方向推動 YoY。"
+        elif current_supports and not base_supports:
+            interpretation = "今年營收的月度變化是主要推動因素，去年基期變化則部分抵銷其影響。"
+        elif base_supports and not current_supports:
+            interpretation = "去年比較基期變化是主要推動因素，今年營收的月度變化則部分抵銷其影響。"
+        else:
+            interpretation = "當期營收與比較基期的影響互相抵銷，淨變化很小。"
+        st.markdown(f"**數學拆解：** {interpretation}")
+
+    current_phrase = ("增加" if this_mom > 0 else "減少" if this_mom < 0 else "持平")
+    base_phrase = ("墊高" if last_mom > 0 else "降低" if last_mom < 0 else "持平")
+    st.markdown(f"- **今年營收變化：** 本月相較上月{current_phrase} **{abs(this_mom):.1f}%**。")
+    st.markdown(f"- **去年比較基期：** 去年同期月營收相較其前月"
+                f"{'增加' if last_mom > 0 else '減少' if last_mom < 0 else '持平'} "
+                f"**{abs(last_mom):.1f}%**，使本月的年增率比較基期相對{base_phrase}。")
+    st.caption("判讀依據：YoY 的相鄰月變化，取決於今年月營收變動倍數與去年同期月營收變動倍數的比值。"
+               "此處是數學上的基期／當期拆解，不代表已證實需求、產品或產業面的實際原因；"
+               "工作天數、季節性、併購與營收認列時點仍需搭配公告查證。")
+
+
 def render_daily_prices(daily):
     high = daily.loc[daily["max"].idxmax()]
     low = daily.loc[daily["min"].idxmin()]
@@ -369,6 +563,9 @@ fig.update_layout(
 fig.update_xaxes(tickformat="%Y-%m", rangeslider_visible=True)
 st.plotly_chart(fig, use_container_width=True, config=CHART_CONFIG)
 st.caption("可使用圖例開關曲線、滑鼠查看數值，或拖曳下方時間軸縮放。")
+render_revenue_insights(df)
+render_growth_driver_analysis(df)
+
 
 st.subheader("多月股價趨勢")
 try:
